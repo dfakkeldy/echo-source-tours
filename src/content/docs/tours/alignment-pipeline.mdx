@@ -1,0 +1,249 @@
+---
+title: On-device alignment pipeline
+description: Matching audiobook audio to ebook text on-device with VAD, WhisperKit, and DTW.
+sourceCommit: c5807ec
+sourceDate: "2026-06-17"
+sidebar:
+  order: 2
+---
+
+import { FileTree, Aside } from '@astrojs/starlight/components';
+import SourceCommit from '../../../components/SourceCommit.astro';
+
+<SourceCommit commit="c5807ec" date="2026-06-17" />
+
+Echo lets you read an ebook while its narration plays, with the text scrolling in time — which means it has to know, second by second, which paragraph the narrator is reading. It works that out entirely **on-device** through a progressive pipeline: first a near-free pass that matches chapter *titles* from the audiobook's metadata to ebook headings, then — only where that fails — true content alignment that chunks the audio at silences, transcribes it with WhisperKit (on-device CoreML), and matches the transcript to ebook tokens with dynamic time warping. The design principle throughout is *cheap signals first*: do the high-confidence, zero-cost work before paying for transcription.
+
+## The files in this tour
+
+<FileTree>
+- EchoCore/Services
+  - AutoAlignmentService.swift
+  - ChapterTitleMatcher.swift
+  - TokenDTW.swift
+</FileTree>
+
+## Tier 0: match chapter titles before transcribing anything
+
+```swift title="EchoCore/Services/ChapterTitleMatcher.swift"
+    static func similarity(between a: String, and b: String) -> Double {
+        let normalizedA = normalize(a)
+        let normalizedB = normalize(b)
+
+        let numbersA = numberTokens(in: normalizedA)
+        let numbersB = numberTokens(in: normalizedB)
+        if !numbersA.isEmpty, !numbersB.isEmpty,
+           !numbersA.isSubset(of: numbersB), !numbersB.isSubset(of: numbersA) {
+            return 0.0
+        }
+
+        // Character-level Levenshtein on the full normalized strings.
+        let stringConfidence = normalizedA.normalizedLevenshteinSimilarity(to: normalizedB)
+
+        // Short-circuit on near-perfect match — avoids tokenization overhead.
+        if stringConfidence >= 0.95 { return stringConfidence }
+
+        // Token-level Jaccard for cases like "Ch 1: The Beginning" vs
+        // "Chapter One — The Beginning" where character edit distance is
+        // high but the meaningful word overlap is strong.
+        let tokensA = tokenize(normalizedA)
+        let tokensB = tokenize(normalizedB)
+
+        guard !tokensA.isEmpty, !tokensB.isEmpty else {
+            return stringConfidence
+        }
+
+        let setA = Set(tokensA)
+        let setB = Set(tokensB)
+        let intersection = setA.intersection(setB).count
+        let union = setA.union(setB).count
+        let wordConfidence = union > 0 ? Double(intersection) / Double(union) : 0.0
+
+        return max(stringConfidence, wordConfidence)
+    }
+```
+
+This is Tier 0's scoring core, and it combines two complementary similarity measures. *Levenshtein* (character edit distance, normalized to 0–1) catches near-identical strings, while *Jaccard* (the fraction of shared word tokens) catches matches like `"Ch 1: The Beginning"` vs. `"Chapter One — The Beginning"`, where the characters diverge wildly but the meaningful words overlap. Returning the **max** of the two means a match wins if *either* signal is strong, and the `>= 0.95` short-circuit skips the more expensive tokenization when the strings already match cleanly. The first lines are the most interesting design choice: before any fuzzy comparison, if both titles carry numbers and neither's number set contains the other's, the function returns `0.0` outright — `"Chapter 2"` and `"Chapter 1"` are *different places* no matter how similar their surrounding words are, so the numbers veto the match.
+
+```swift title="EchoCore/Services/ChapterTitleMatcher.swift"
+    static func isGenericNumericTitle(_ title: String) -> Bool {
+        let normalized = normalize(title)
+        guard !normalized.isEmpty else { return false }
+
+        // Structural keyword followed by an arabic or roman number.
+        if normalized.range(of: Self.keywordNumberPattern,
+                            options: .regularExpression) != nil {
+            return true
+        }
+        // A bare number, optionally decorated with separators ("12", "07.").
+        return normalized.range(of: #"^[\s.:#\-–—]*[0-9]+[\s.:#\-–—]*$"#,
+                                options: .regularExpression) != nil
+    }
+```
+
+This guard is what keeps Tier 0 honest. M4B metadata numbers *tracks*, not book chapters — an Audible rip routinely labels its opening-credits track `"Chapter 1"`, which shifts every later label off the ebook's own numbering — so a title like `"Chapter 7"` or a bare `"12"` carries no information about *which* ebook heading the audio corresponds to. `isGenericNumericTitle` detects those generic labels (a structural keyword plus a number, or a bare number) and the matcher skips them entirely, leaving those chapters for the content-based pipeline below. It's a deliberate refusal to manufacture confidence from a coincidence: matching `"Chapter 7"` to the ebook's heading that happens to read `"Chapter 7"` would feel like a hit but prove nothing.
+
+## The pipeline, end to end
+
+```swift title="EchoCore/Services/AutoAlignmentService.swift"
+    func runPipeline(chapters: [Chapter], blocks: [EPubBlockRecord]) async throws {
+        guard !chapters.isEmpty else {
+            state.fail("No chapters found for this audiobook.")
+            return
+        }
+        guard !blocks.isEmpty else {
+            state.fail("No EPUB blocks found for this audiobook.")
+            return
+        }
+
+        // ── Clear previous automatic runs ──
+        // Anchors from earlier automatic passes (pipeline or continuous
+        // background) would otherwise survive and block re-anchoring, so a
+        // re-run could never correct a bad earlier result.
+        let clearedCount = try anchorDAO.deleteAutoPipelineAnchors(for: audiobookID)
+        if clearedCount > 0 {
+            try alignmentService.recalculateTimeline()
+            state.log("Cleared \(clearedCount) anchors from previous automatic runs")
+        }
+
+        // ── Tier 0: Metadata Title Matching ──
+        // Compare audiobook chapter titles (from M4B metadata) to EPUB
+        // heading blocks before doing any expensive transcription. These
+        // bootstrap anchors give the timeline rough shape immediately;
+        // content alignment refines or supersedes them below.
+        state.phase = .matchingTitles
+        // … progress/logging of generic-title counts omitted …
+        let titleMatches = ChapterTitleMatcher.matchChapterTitles(
+            chapters: chapters, blocks: blocks
+        )
+
+        var tier0AnchorIDByBlockID: [String: String] = [:]
+        if !titleMatches.isEmpty {
+            let titleAnchors = createTitleMatchAnchors(matches: titleMatches)
+            try alignmentService.insertAnchors(titleAnchors)
+            tier0AnchorIDByBlockID = Dictionary(
+                uniqueKeysWithValues: titleAnchors.map { ($0.epubBlockID, $0.id) }
+            )
+            // … logging omitted …
+        }
+
+        guard !Task.isCancelled else { return }
+
+        // ── Load model ──
+        state.phase = .loadingModel
+        // … progress/logging omitted …
+        do {
+            try await loadWhisperModel()
+            state.log("Model loaded ✓")
+        } catch {
+            state.fail("Failed to load speech recognition model: \(error.localizedDescription)")
+            return
+        }
+
+        guard !Task.isCancelled else { return }
+
+        // ── Content alignment ──
+        try await runDTWPipeline(
+            chapters: chapters,
+            blocks: blocks,
+            tier0AnchorIDByBlockID: tier0AnchorIDByBlockID
+        )
+
+        guard !Task.isCancelled else { return }
+
+        // … final state + model unload omitted …
+        state.complete()
+        scheduleModelUnload()
+    }
+```
+
+`runPipeline` is the conductor, and reading it top to bottom *is* the pipeline. The very first real step deletes anchors from previous automatic runs: without that, a bad earlier result would survive and its blocks would already be "taken", so a re-run could never converge on a better answer — clearing makes re-alignment **idempotent and self-correcting**. Then Tier 0 runs and inserts cheap *bootstrap* anchors, but it hands their IDs forward in `tier0AnchorIDByBlockID` rather than treating them as final — content alignment is allowed to supersede them. Only after that does it pay the real cost: loading the WhisperKit model and running `runDTWPipeline`. Notice the `guard !Task.isCancelled` checks between every stage — transcription is slow, so the user must be able to cancel cleanly.
+
+```swift title="EchoCore/Services/AutoAlignmentService.swift"
+            // 1. Capture + transcribe in bounded chunks.
+            let chunks = AlignmentChunkPlanner.plan(
+                chapterStart: chapter.startSeconds,
+                chapterEnd: chapter.endSeconds,
+                silences: silences,
+                minChunk: Config.minChunkSeconds,
+                maxChunk: Config.maxChunkSeconds
+            )
+            // … per-chunk progress + cancellation omitted …
+            var words: [TranscribedWord] = []
+            for (cIdx, chunk) in chunks.enumerated() {
+                // … progress update omitted …
+                words += try await captureAndTranscribe(at: chunk.start, duration: chunk.duration)
+            }
+
+            // … empty-guard omitted …
+
+            // 2. Token streams — every audio token carries its word's real
+            //    timestamp, so pauses and rate changes cost nothing.
+            let audioTokens = words.flatMap { word in
+                TokenDTW.normalize(word.text).map {
+                    TokenDTW.AudioToken(text: $0, time: word.start)
+                }
+            }
+            var epubTokens: [TokenDTW.EPubToken] = []
+            for block in alignmentBlocks {
+                guard let text = block.text, !block.isHidden else { continue }
+                epubTokens += TokenDTW.normalize(text).map {
+                    TokenDTW.EPubToken(text: $0, blockID: block.id)
+                }
+            }
+            // … empty-guard omitted …
+
+            // 3. Align, then gate to strong, monotonic, in-window anchors.
+            // … progress update omitted …
+            let candidates = TokenDTW.alignWithBisection(epub: epubTokens, audio: audioTokens)
+            // … window + monotonic filtering, then AnchorSelector.select(…) omitted …
+```
+
+This is the heart of content alignment, running per chapter. First the audio is chunked at *silences* — `SilenceDetectionService` finds the pauses (voice-activity detection), and `AlignmentChunkPlanner` cuts there so a chunk never splits a word mid-utterance. Each chunk is transcribed on-device into timestamped words, then both sides are reduced to comparable token streams by `TokenDTW.normalize`; crucially every audio token keeps its word's real timestamp, so when DTW later matches a token, the audio time falls out for free. The ebook tokens carry their `blockID` instead, so a matched token tells you which paragraph it belongs to. Finally `alignWithBisection` produces anchor *candidates*, which are filtered to strong, time-monotonic, in-window matches before being inserted — and a strong content match deletes the block's Tier 0 bootstrap anchor, exactly as `runPipeline` promised.
+
+## Dynamic time warping the tokens
+
+```swift title="EchoCore/Services/TokenDTW.swift"
+        for i in 1...n {
+            cost1[0] = Int32(i) * Cost.gap
+            let eToken = epub[i - 1].text
+            for j in 1...m {
+                let aToken = audio[j - 1].text
+                let matchCost: Int32
+                if eToken == aToken {
+                    matchCost = Cost.exact
+                } else if eToken.hasPrefix(aToken) || aToken.hasPrefix(eToken) {
+                    matchCost = Cost.prefix
+                } else {
+                    matchCost = Cost.substitution
+                }
+
+                let sub = cost0[j - 1] + matchCost
+                let ins = cost1[j - 1] + Cost.gap
+                let del = cost0[j] + Cost.gap
+
+                let idx = i * (m + 1) + j
+                if sub <= ins && sub <= del {
+                    cost1[j] = sub
+                    dir[idx] = 0
+                } else if ins <= del {
+                    cost1[j] = ins
+                    dir[idx] = 1
+                } else {
+                    cost1[j] = del
+                    dir[idx] = 2
+                }
+            }
+            swap(&cost0, &cost1)
+        }
+```
+
+This nested loop is the [dynamic-time-warping](/echo-source-tours/concepts/) recurrence: for every ebook token `i` against every audio token `j`, it computes the cheapest way to reach cell `(i, j)`, choosing among a diagonal step (match or substitute the two tokens), an *insertion* (skip an audio token), or a *deletion* (skip an ebook token). The cost model is where the alignment's judgment lives — an exact match is free, a prefix match (`"chapter"` vs. a clipped `"chap"`) is cheap, and a `substitution` is priced *above* one gap but below two, so the path prefers skipping a never-narrated span over inventing a wrong match, yet still tolerates a single mistranscribed word. This is what DTW buys you over naive position-based matching: the narrator can pause, repeat, skip a footnote, or read at a varying pace, and the lowest-cost path *stretches and compresses* to absorb that drift — `cost0`/`cost1` are just two rolling rows (the full matrix would be `n×m`), while the `dir` array remembers each step so the path can be reconstructed by backtracking.
+
+<Aside type="note">
+This algorithmic code is exactly the kind that earns its tests: the Echo repo unit-tests it directly with `TokenDTWTests` and `ChapterTitleMatcherTests`. Pure functions over plain inputs — token arrays, title strings — with deterministic outputs are cheap to pin down and catch regressions the moment a cost weight or threshold drifts.
+</Aside>
+
+## Why it's built this way
+
+The whole pipeline is an exercise in spending compute where it pays off. Tier 0's title matching is nearly free and, when titles are real, extremely high-confidence — so it runs first and shrinks the work the expensive stage has to do. The generic-title veto is the discipline that keeps that tier trustworthy: it would be easy to inflate the match rate by accepting `"Chapter 7"` matches, but those are coincidences, not evidence, so the code refuses them and falls back to content alignment instead. That fallback — silence chunking, on-device transcription, DTW — is powerful but slow, so it only runs for the chapters Tier 0 couldn't resolve. And because each run clears its own previous anchors, the pipeline is safe to re-run: every pass starts clean and can only improve, never accrete stale mistakes. Cheap-and-confident first, expensive-and-thorough second, idempotent throughout.
