@@ -1,26 +1,23 @@
-// @ts-check
+// astro.config.mjs
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
-// https://astro.build/config
 export default defineConfig({
-	integrations: [
-		starlight({
-			title: 'My Docs',
-			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/withastro/starlight' }],
-			sidebar: [
-				{
-					label: 'Guides',
-					items: [
-						// Each item here is one entry in the navigation menu.
-						{ label: 'Example Guide', slug: 'guides/example' },
-					],
-				},
-				{
-					label: 'Reference',
-					items: [{ autogenerate: { directory: 'reference' } }],
-				},
-			],
-		}),
-	],
+  site: 'https://dfakkeldy.github.io',
+  base: '/echo-source-tours',
+  integrations: [
+    starlight({
+      title: 'Echo Source Tours',
+      description: 'Learn iOS/macOS development by touring the Echo codebase.',
+      social: [
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/dfakkeldy/Echo' },
+      ],
+      sidebar: [
+        { label: 'Start here', items: [{ label: 'Welcome', slug: '' }] },
+        { label: 'Tours', items: [{ autogenerate: { directory: 'tours' } }] },
+        { label: 'Concepts', items: [{ autogenerate: { directory: 'concepts' } }] },
+      ],
+      expressiveCode: { themes: ['github-dark', 'github-light'] },
+    }),
+  ],
 });
