@@ -1,6 +1,7 @@
 // astro.config.mjs
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import starlightLinksValidator from 'starlight-links-validator';
 
 export default defineConfig({
   site: 'https://dfakkeldy.github.io',
@@ -18,6 +19,7 @@ export default defineConfig({
         { label: 'Concepts', items: [{ autogenerate: { directory: 'concepts' } }] },
       ],
       expressiveCode: { themes: ['github-dark', 'github-light'] },
+      plugins: [starlightLinksValidator()],
     }),
   ],
 });
