@@ -71,7 +71,7 @@ final class DatabaseService {
     }
 ```
 
-The production initializer opens the real database. It resolves the App Group container (so the iOS app, the widget, and the watch all read the *same* SQLite file), creates the directory if needed, and lands `echo.sqlite` inside it. It then opens a `DatabasePool` configured with WAL journaling — which lets one writer and many readers work concurrently without blocking the UI — and immediately runs migrations. The `throws` is deliberate: if the App Group entitlement is misconfigured there is no safe fallback, so it surfaces `DatabaseError.appGroupNotFound` rather than limping along on a wrong path.
+The production initializer opens the real database. It resolves the App Group container (so the iOS app, the widget, and the watch all read the *same* SQLite file) and lands `echo.sqlite` inside it. It then opens a `DatabasePool` configured with WAL journaling — which lets one writer and many readers work concurrently without blocking the UI — and immediately runs migrations. The `throws` is deliberate: if the App Group entitlement is misconfigured there is no safe fallback, so it surfaces `DatabaseError.appGroupNotFound` rather than limping along on a wrong path.
 
 ```swift title="Shared/Database/DatabaseService.swift"
     init(inMemory: Void) throws {
@@ -127,6 +127,21 @@ enum Schema_V1 {
 
 Each schema version is a stateless `enum` with one `static func migrate`, which keeps the migration body out of `DatabaseService` and makes the list in `runMigrations` read like a changelog. GRDB's table builder (`db.create(table:)`) is itself a typed, parameter-safe DSL — column names and types are Swift, not interpolated SQL strings — so the schema can't be malformed by a stray quote. Because `Schema_V1.migrate` is pure and `nonisolated`, it's the same code whether it runs against the production pool or a test's in-memory queue.
 
+## Migrating once, across processes
+
+```swift title="Shared/Database/DatabaseService.swift"
+    /// Uses the App Group's shared UserDefaults so that extensions (widget,
+    /// watch) see the same migration state as the main app. Storing the flag
+    /// in `UserDefaults.standard` would cause duplicate migration attempts
+    /// when an extension launches first.
+    var isMigrationDone: Bool {
+        get { UserDefaults(suiteName: appGroupIdentifier)?.bool(forKey: migrationFlag) ?? false }
+        set { UserDefaults(suiteName: appGroupIdentifier)?.set(newValue, forKey: migrationFlag) }
+    }
+```
+
+The App Group buys more than a shared SQLite file — it also gives every process a shared place to record that migrations have run. Because the iOS app, the widget, and the watch are separate processes with their *own* `UserDefaults.standard`, a flag written to `.standard` by one is invisible to the others — so if an extension launches first it sees no flag and attempts the migration again. Reading and writing `isMigrationDone` through `UserDefaults(suiteName: appGroupIdentifier)` (the same App Group introduced in the production initializer) gives all of them one shared view of migration state, so the work happens once no matter who starts first.
+
 ## A safe query
 
 ```swift title="Shared/Database/DatabaseService.swift"
@@ -147,7 +162,7 @@ Each schema version is a stateless `enum` with one `static func migrate`, which 
     }
 ```
 
-Rather than scatter SQL around the app, `DatabaseService` exposes four thin accessors that hand callers a GRDB `Database` connection inside a managed transaction. `read` takes a shared reader; `write` serializes through the single writer — so callers can't accidentally corrupt state by writing on a read connection. The generic `<T>` lets a block return whatever it queried (a record, a count, a tuple) while the transaction boundary stays owned here. The `@Sendable` async variants exist so work can move off the main actor safely under Swift's strict concurrency, while every query block ultimately runs against the same injected `writer` — production or in-memory, identically.
+Rather than scatter SQL around the app, `DatabaseService` exposes four thin accessors that hand callers a scoped GRDB `Database` connection. `read` runs the block against a read-only snapshot (reads can run concurrently); `write` wraps the block in a transaction and serializes through the single writer — so a caller can't accidentally mutate state on a read connection, and the transaction boundary stays owned here rather than at the call site. The generic `<T>` lets a block return whatever it queried (a record, a count, a tuple). The `@Sendable` async variants exist so work can move off the main actor safely under Swift's strict concurrency, while every query block ultimately runs against the same injected `writer` — production or in-memory, identically.
 
 ## Why it's built this way
 
