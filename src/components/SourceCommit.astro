@@ -9,7 +9,7 @@ const { commit, date, repo = 'https://github.com/dfakkeldy/Echo' } = Astro.props
 const href = `${repo}/commit/${commit}`;
 ---
 <p class="source-commit">
-  📌 Source: <a href={href} target="_blank" rel="noopener">Echo @ <code>{commit}</code></a>
+  📌 Source: <a href={href} target="_blank" rel="noopener noreferrer">Echo @ <code>{commit}</code></a>
   · snapshot as of {date}. The code may have changed since.
 </p>
 
