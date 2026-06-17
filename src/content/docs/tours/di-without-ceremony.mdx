@@ -1,0 +1,154 @@
+---
+title: DI without ceremony
+description: How Echo injects its database with a concrete type and two initializers.
+sourceCommit: c5807ec
+sourceDate: "2026-06-17"
+sidebar:
+  order: 1
+---
+
+import { FileTree, Aside } from '@astrojs/starlight/components';
+import SourceCommit from '../../../components/SourceCommit.astro';
+
+<SourceCommit commit="c5807ec" date="2026-06-17" />
+
+Echo never reaches for a singleton or a protocol to make its database testable. It injects one concrete type — `DatabaseService` — and earns its testability from a *second initializer* (`init(inMemory:)`) rather than from an abstraction layer. Echo once carried a "protocol-oriented" abstraction over its services and later deleted it, because the protocols were never actually used as injection seams. This tour walks the file that survived that simplification.
+
+## The files in this tour
+
+<FileTree>
+- Shared/Database
+  - DatabaseService.swift
+  - Schema_V1.swift
+</FileTree>
+
+## A concrete type, not a protocol
+
+```swift title="Shared/Database/DatabaseService.swift"
+/// Owns a GRDB database in WAL mode (DatabasePool for disk, DatabaseQueue for in-memory).
+@MainActor @Observable
+final class DatabaseService {
+    let writer: DatabaseWriter
+    let dbPath: String
+    private let logger = Logger(category: "DatabaseService")
+
+    @ObservationIgnored private let migrationFlag = "sql_migration_done"
+    @ObservationIgnored private let appGroupIdentifier: String
+```
+
+`DatabaseService` is a plain `final class`, not something hiding behind a `DatabaseServiceProtocol`. The one stored seam that matters is `let writer: DatabaseWriter` — GRDB's protocol that both `DatabasePool` (disk) and `DatabaseQueue` (memory) conform to. That single property is what lets the production and in-memory paths share *every* line of query code below it, so the polymorphism lives in GRDB's type rather than in an abstraction Echo had to invent and maintain. Marking it `@Observable` and `@MainActor` means SwiftUI can bind the concrete type directly through `@Environment` — which is exactly why a hand-rolled protocol couldn't have served as the environment key anyway.
+
+## Two initializers: production vs. tests
+
+```swift title="Shared/Database/DatabaseService.swift"
+    init(appGroupIdentifier: String = "group.com.echo.audiobooks") throws {
+        self.appGroupIdentifier = appGroupIdentifier
+        guard
+            let containerURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: appGroupIdentifier
+            )
+        else {
+            throw DatabaseError.appGroupNotFound(appGroupIdentifier)
+        }
+
+        try FileManager.default.createDirectory(
+            at: containerURL,
+            withIntermediateDirectories: true
+        )
+
+        let path = containerURL.appendingPathComponent("echo.sqlite").path
+        self.dbPath = path
+
+        var config = Configuration()
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA journal_mode=WAL")
+            try db.execute(sql: "PRAGMA foreign_keys=ON")
+        }
+        writer = try DatabasePool(path: path, configuration: config)
+
+        try runMigrations(writer: writer)
+        logger.info("Database opened at \(path)")
+    }
+```
+
+The production initializer opens the real database. It resolves the App Group container (so the iOS app, the widget, and the watch all read the *same* SQLite file), creates the directory if needed, and lands `echo.sqlite` inside it. It then opens a `DatabasePool` configured with WAL journaling — which lets one writer and many readers work concurrently without blocking the UI — and immediately runs migrations. The `throws` is deliberate: if the App Group entitlement is misconfigured there is no safe fallback, so it surfaces `DatabaseError.appGroupNotFound` rather than limping along on a wrong path.
+
+```swift title="Shared/Database/DatabaseService.swift"
+    init(inMemory: Void) throws {
+        self.appGroupIdentifier = "inMemory"
+        var config = Configuration()
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA foreign_keys=ON")
+        }
+        self.writer = try DatabaseQueue(path: ":memory:", configuration: config)
+        self.dbPath = ":memory:"
+        try runMigrations(writer: writer)
+    }
+```
+
+This is the entire dependency-injection strategy: a second `init` that swaps the disk-backed `DatabasePool` for an in-memory `DatabaseQueue` opened at `:memory:`. Crucially it calls the *same* `runMigrations(writer:)`, so a test gets the real schema built by the real migrations — not a mock and not a hand-stubbed table. The `inMemory: Void` label is a small but intentional trick: it makes the call site read as `DatabaseService(inMemory:)` and keeps this initializer from colliding with `init(appGroupIdentifier:)`, since they would otherwise both be zero-meaningful-argument inits. Because there is no App Group, `appGroupIdentifier` is set to the sentinel `"inMemory"`.
+
+<Aside type="tip">
+The whole DI story is that second `init`. Tests construct `DatabaseService(inMemory:)` and get a *real* database with the *real* migrations applied — no `.shared`, no protocol, no mock object to drift out of sync with production.
+</Aside>
+
+## Migrations as the schema source of truth
+
+```swift title="Shared/Database/DatabaseService.swift"
+    private nonisolated func runMigrations(writer: DatabaseWriter) throws {
+        var migrator = DatabaseMigrator()
+        migrator.registerMigration("v1_create_schema") { db in try Schema_V1.migrate(db) }
+        migrator.registerMigration("v2_timeline_support") { db in try Schema_V2.migrate(db) }
+        // … v3 through v17 registered the same way …
+        migrator.registerMigration("v18_abs_server") { db in try Schema_V18.migrate(db) }
+        try migrator.migrate(writer)
+    }
+```
+
+A `DatabaseMigrator` holds an *ordered* list of named, append-only migrations; GRDB records which ones a given database has already run and applies only the missing ones. That's what makes the two initializers interchangeable — a brand-new `:memory:` database fast-forwards through `v1` to `v18` in one shot, while a returning user's disk database only runs whatever it hasn't seen. Each migration's name (`"v1_create_schema"`) is its permanent identity, so these strings must never be renamed once shipped. Note `nonisolated`: migrations run off the main actor even though the class is `@MainActor`, so opening the database never blocks the UI.
+
+```swift title="Shared/Database/Schema_V1.swift"
+/// V1 schema — creates all tables, views, and FTS5 indexes for the unified timeline.
+enum Schema_V1 {
+    nonisolated static func migrate(_ db: Database) throws {
+        // ── Foundation ──
+        try db.create(table: "audiobook") { t in
+            t.column("id", .text).primaryKey()
+            t.column("title", .text).notNull()
+            t.column("author", .text)
+            t.column("duration", .double).notNull()
+            t.column("file_count", .integer)
+            t.column("added_at", .text).notNull().defaults(sql: "(datetime('now'))")
+        }
+        // … remaining tables omitted …
+    }
+}
+```
+
+Each schema version is a stateless `enum` with one `static func migrate`, which keeps the migration body out of `DatabaseService` and makes the list in `runMigrations` read like a changelog. GRDB's table builder (`db.create(table:)`) is itself a typed, parameter-safe DSL — column names and types are Swift, not interpolated SQL strings — so the schema can't be malformed by a stray quote. Because `Schema_V1.migrate` is pure and `nonisolated`, it's the same code whether it runs against the production pool or a test's in-memory queue.
+
+## A safe query
+
+```swift title="Shared/Database/DatabaseService.swift"
+    func read<T>(_ block: @escaping (Database) throws -> T) throws -> T {
+        try writer.read(block)
+    }
+
+    func readAsync<T>(_ block: @escaping @Sendable (Database) throws -> T) async throws -> T {
+        try await writer.read(block)
+    }
+
+    func write<T>(_ block: @escaping (Database) throws -> T) throws -> T {
+        try writer.write(block)
+    }
+
+    func writeAsync<T>(_ block: @escaping @Sendable (Database) throws -> T) async throws -> T {
+        try await writer.write(block)
+    }
+```
+
+Rather than scatter SQL around the app, `DatabaseService` exposes four thin accessors that hand callers a GRDB `Database` connection inside a managed transaction. `read` takes a shared reader; `write` serializes through the single writer — so callers can't accidentally corrupt state by writing on a read connection. The generic `<T>` lets a block return whatever it queried (a record, a count, a tuple) while the transaction boundary stays owned here. The `@Sendable` async variants exist so work can move off the main actor safely under Swift's strict concurrency, while every query block ultimately runs against the same injected `writer` — production or in-memory, identically.
+
+## Why it's built this way
+
+Echo deliberately injects its database as a *concrete* `DatabaseService` and makes it testable with `DatabaseService(inMemory:)` — no `.shared` singleton, no protocol, no mock. An earlier "protocol-oriented" abstraction (a `MediaPlayable` protocol plus `PlaybackControllerProtocol`, `BookmarkStoreProtocol`, `StoreManagerProtocol`, and a set of mocks) was later deleted, because it was never used as an injection seam: `PlayerModel` hard-constructs its services, and SwiftUI's `@Environment` binds the concrete `@Observable` type — so those protocols couldn't even *be* environment keys. The lesson the surviving code teaches is simple: an abstraction with a single implementation and no wired-in test double is just indirection. Add a protocol only when a real second implementation (say, a future video player) or a genuinely wired-in test double exists. Until then, the `DatabaseService(inMemory:)` pattern *is* the working DI seam — real database, real schema, zero ceremony.

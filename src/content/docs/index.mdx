@@ -4,11 +4,10 @@ description: Learn iOS & macOS development by touring a real, shipping app.
 template: splash
 hero:
   tagline: Learn iOS by reading a real, shipping app — Echo — one subsystem at a time.
-  # actions restored when tour pages land in later tasks:
-  # actions:
-  #   - text: Start with Dependency Injection
-  #     link: /echo-source-tours/tours/di-without-ceremony/
-  #     icon: right-arrow
+  actions:
+    - text: Start with Dependency Injection
+      link: /echo-source-tours/tours/di-without-ceremony/
+      icon: right-arrow
 ---
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
@@ -19,13 +18,13 @@ commit and explains it block by block.
 
 ## Tours
 
-{/* LinkCards restored when each tour page lands in a later task:
 <CardGrid>
   <LinkCard
     title="DI without ceremony"
     href="/echo-source-tours/tours/di-without-ceremony/"
     description="How Echo injects its database with a concrete type and two initializers — no protocols, no mocks."
   />
+  {/* Remaining LinkCards restored when each tour page lands in a later task:
   <LinkCard
     title="On-device alignment pipeline"
     href="/echo-source-tours/tours/alignment-pipeline/"
@@ -36,7 +35,7 @@ commit and explains it block by block.
     href="/echo-source-tours/tours/one-model-four-targets/"
     description="How the Shared/ layer feeds iOS, watchOS, the widget, and macOS from one source of truth."
   />
+  */}
 </CardGrid>
-*/}
 
-Tours are coming soon. Each will walk through a real subsystem of the Echo codebase.
+More tours are coming soon. Each will walk through a real subsystem of the Echo codebase.
