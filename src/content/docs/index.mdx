@@ -1,41 +1,42 @@
 ---
-title: Welcome to Starlight
-description: Get started building your docs site with Starlight.
-template: splash # Remove or comment out this line to display the site sidebar on this page.
+title: Echo Source Tours
+description: Learn iOS & macOS development by touring a real, shipping app.
+template: splash
 hero:
-  tagline: Congrats on setting up a new Starlight project!
-  image:
-    file: ../../assets/houston.webp
-  actions:
-    - text: Example Guide
-      link: /echo-source-tours/guides/example/
-      icon: right-arrow
-    - text: Read the Starlight docs
-      link: https://starlight.astro.build
-      icon: external
-      variant: minimal
+  tagline: Learn iOS by reading a real, shipping app — Echo — one subsystem at a time.
+  # actions restored when tour pages land in later tasks:
+  # actions:
+  #   - text: Start with Dependency Injection
+  #     link: /echo-source-tours/tours/di-without-ceremony/
+  #     icon: right-arrow
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-## Next steps
+These tours walk through real subsystems of **Echo**, an open-source audiobook study
+player for iOS, watchOS, and macOS. Each tour snapshots the actual source at a known
+commit and explains it block by block.
 
-<CardGrid stagger>
-	<Card title="Update content" icon="pencil">
-		Edit `src/content/docs/index.mdx` to see this page change.
-	</Card>
-	<Card title="Change page layout" icon="document">
-		Delete `template: splash` in `src/content/docs/index.mdx` to display a
-		sidebar on this page.
-	</Card>
-	<Card title="Add new content" icon="add-document">
-		Add Markdown or MDX files to `src/content/docs` to create new pages.
-	</Card>
-	<Card title="Configure your site" icon="setting">
-		Edit your `sidebar` and other config in `astro.config.mjs`.
-	</Card>
-	<Card title="Read the docs" icon="open-book">
-		Learn more in [the Starlight Docs](https://starlight.astro.build/).
-	</Card>
+## Tours
+
+{/* LinkCards restored when each tour page lands in a later task:
+<CardGrid>
+  <LinkCard
+    title="DI without ceremony"
+    href="/echo-source-tours/tours/di-without-ceremony/"
+    description="How Echo injects its database with a concrete type and two initializers — no protocols, no mocks."
+  />
+  <LinkCard
+    title="On-device alignment pipeline"
+    href="/echo-source-tours/tours/alignment-pipeline/"
+    description="Matching audiobook audio to ebook text on-device: silence chunking, WhisperKit, and dynamic time warping."
+  />
+  <LinkCard
+    title="One model, four targets"
+    href="/echo-source-tours/tours/one-model-four-targets/"
+    description="How the Shared/ layer feeds iOS, watchOS, the widget, and macOS from one source of truth."
+  />
 </CardGrid>
+*/}
 
+Tours are coming soon. Each will walk through a real subsystem of the Echo codebase.
