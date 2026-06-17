@@ -1,0 +1,159 @@
+---
+title: One model, four targets
+description: How the Shared/ layer feeds iOS, watchOS, the widget, and macOS.
+sourceCommit: c5807ec
+sourceDate: "2026-06-17"
+sidebar:
+  order: 3
+---
+
+import { FileTree, Aside } from '@astrojs/starlight/components';
+import SourceCommit from '../../../components/SourceCommit.astro';
+
+<SourceCommit commit="c5807ec" date="2026-06-17" />
+
+Echo ships as four products — an iOS app, a watchOS app, a macOS app, and a Home Screen widget — that all have to agree on where the data lives and what they say to each other. They stay in lockstep not by copying constants around, but because the *contracts* live exactly once in `Shared/` and every target imports the same definitions. This tour follows two of those contracts to their consumers: the on-disk location the app and the widget both resolve, and the message vocabulary the app and the watch both speak.
+
+## The files in this tour
+
+<FileTree>
+- Shared
+  - AppGroupDefaults.swift
+  - FileLocations.swift
+  - WatchAction.swift
+  - WatchMessageKey.swift
+- Echo Widget
+  - Views/Echo_Widget.swift
+  - Models/AppIntent.swift
+</FileTree>
+
+## One location, shared by app and widget
+
+```swift title="Shared/AppGroupDefaults.swift"
+/// Shared app-group UserDefaults accessor for iOS, watchOS, macOS, and Widget targets.
+/// Provides a single source of truth for the suite name and migration logic.
+public enum AppGroupDefaults {
+    public static let suiteName = "group.com.echo.audiobooks"
+
+    private static let migrationKey = "didMigrateWidgetDefaultsToAppGroup"
+
+    public static var shared: UserDefaults {
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            #if DEBUG
+            assertionFailure("Unable to open app-group UserDefaults suite: \(suiteName)")
+            #endif
+            return .standard
+        }
+        return defaults
+    }
+```
+
+The App Group identifier `"group.com.echo.audiobooks"` is the linchpin of cross-target data sharing: an App Group is an Apple-issued sandbox that several signed targets can all reach into, and naming it once here means no target can typo its way into a *different*, empty container. `AppGroupDefaults.shared` hands back the `UserDefaults` suite for that group, so the iOS app writes playback state and the widget reads it from the exact same store. The type is a `public enum` with only static members — a namespace, deliberately impossible to instantiate — which is the right shape for a constant that every target must agree on but no one should own an instance of.
+
+```swift title="Shared/FileLocations.swift"
+    /// The shared App Group container directory.
+    static func appGroupContainer(identifier: String = "group.com.echo.audiobooks") throws -> URL {
+        guard let url = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: identifier
+        ) else {
+            throw Error.appGroupNotFound(identifier)
+        }
+        return url
+    }
+```
+
+The same identifier appears a second time, here as the *default argument* that resolves the shared container's actual directory on disk — the folder where larger artifacts like the database live, as opposed to the small key-value snapshot in `UserDefaults`. Because both files default to the identical string, the key-value suite and the file container always belong to the same App Group; change it in one place and you would have to change it everywhere, which is the smell that tells you the constant wants to be defined once. `containerURL(forSecurityApplicationGroupIdentifier:)` is the OS call that turns the abstract group name into a concrete `URL`, and it returns `nil` when the entitlement is missing — hence the typed `appGroupNotFound` error rather than a silent fallback.
+
+```swift title="Echo Widget/Views/Echo_Widget.swift"
+    private func currentEntry() -> SimpleEntry {
+        let defaults = AppGroupDefaults.shared
+        let title = defaults.string(forKey: "title") ?? "No track"
+        let isPlaying = defaults.bool(forKey: "isPlaying")
+        let progressFraction = defaults.double(forKey: "totalProgressFraction")
+        let thumbnailData = safelyDownsampledData(defaults.data(forKey: "thumbnailData"))
+
+        return SimpleEntry(date: Date(), title: title, isPlaying: isPlaying, progressFraction: progressFraction, thumbnailData: thumbnailData)
+    }
+```
+
+Here is what the widget *actually* reads — and it is worth being precise, because the widget does **not** open Echo's GRDB database. It reads a small snapshot of playback state that the app pushes into the App Group `UserDefaults`: the current `title`, the `isPlaying` flag, a `totalProgressFraction`, and downsampled cover-art bytes. The widget runs in its own process on its own refresh schedule, so it can never call into the running app; the shared `UserDefaults` suite is the seam that lets the app *publish* state and the widget *poll* it, with `AppGroupDefaults.shared` guaranteeing both sides name the same store.
+
+The same App Group store is also where the widget's tap *writes back*:
+
+```swift title="Echo Widget/Models/AppIntent.swift"
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        // Widget extensions cannot import WatchConnectivity. The main app
+        // handles watch communication when openAppWhenRun opens it.
+        let defaults = AppGroupDefaults.shared
+        let currentIsPlaying = defaults.bool(forKey: "isPlaying")
+        defaults.set(!currentIsPlaying, forKey: "isPlaying")
+        WidgetCenter.shared.reloadTimelines(ofKind: "Echo_Widget")
+
+        return .result()
+    }
+```
+
+The play/pause `AppIntent` flips the very same `"isPlaying"` key the timeline reads, then asks WidgetKit to reload — so the snapshot is a genuine two-way channel, not just a read-only mirror. The comment is the honest detail: a widget extension *cannot* import `WatchConnectivity`, so it deliberately does the minimum (toggle the shared flag, open the app) and lets the full-featured app reconcile everything else. That is the per-target behavior diverging while the *contract* — the App Group suite and its keys — stays shared.
+
+## One message contract, shared by app and watch
+
+```swift title="Shared/WatchAction.swift"
+/// Actions available for Watch remote control and iOS settings configuration.
+/// Shared across iOS, watchOS, macOS, and Widget targets.
+public enum WatchAction: String, Codable, CaseIterable, Identifiable {
+    case playPause
+    case skipForward
+    case skipBackward
+    case nextTrack
+    case previousTrack
+    case nextSection
+    case previousSection
+    case loopMode
+    case speed
+    case sleepTimer
+    case bookmark
+    case pomodoro
+    case empty
+    // …
+    /// Command string sent over WatchConnectivity. Unused on iOS/macOS.
+    public var command: String {
+        switch self {
+        case .playPause:     return "toggle"
+        case .skipForward:   return "skipForward"
+        case .skipBackward:  return "skipBackward"
+        case .nextTrack:     return "next"
+        case .previousTrack: return "previous"
+        case .nextSection:     return "nextSection"
+        case .previousSection: return "previousSection"
+        case .loopMode:      return "cycleLoopMode"
+        case .speed:         return "cycleSpeed"
+        case .sleepTimer:    return "toggleSleepTimer"
+        case .bookmark:      return "addBookmark"
+        case .pomodoro:      return "pomodoro"
+        case .empty:         return ""
+        }
+    }
+}
+```
+
+`WatchAction` is the single enum that defines *every* remote-control action the watch can trigger, and its doc comment names all four targets that import it. The watch sends an action's `command` string over `WatchConnectivity`; the iOS side maps that same string back to behaviour. Because both ends switch over one `enum` rather than over loose strings each maintains separately, adding a case forces the compiler to surface it everywhere via `CaseIterable` — there is no way for the watch to send `"cycleSpeed"` while iOS quietly expects `"changeSpeed"`. That is the whole point of the shared definition: the wire vocabulary cannot drift, because there is only one copy of it.
+
+```swift title="Shared/WatchMessageKey.swift"
+/// Dictionary keys used in the WatchConnectivity message protocol.
+/// Shared across iOS (WatchCommandRouter) and watchOS (WatchViewModel).
+enum WatchMessageKey {
+    static let command = "command"
+    static let params = "params"
+}
+```
+
+The `command` string from `WatchAction` doesn't travel naked — it rides inside a `[String: Any]` message dictionary, and `WatchMessageKey` is the shared definition of the two keys that dictionary uses. The doc comment even names the concrete consumers on each side: `WatchCommandRouter` on iOS packs the dictionary, `WatchViewModel` on watchOS unpacks it. With both processes referencing `WatchMessageKey.command` rather than a hand-typed `"command"`, the envelope is as drift-proof as the payload.
+
+<Aside type="tip">
+The pattern in both halves of this tour is the same: put the *contract* in `Shared/`, not the behavior. Each target keeps its own UI, its own process, and its own capabilities — the widget can't talk to the watch, the watch sends commands the widget never will — but they all agree on the App Group name, the snapshot keys, the action vocabulary, and the message envelope, because each of those is defined exactly once.
+</Aside>
+
+## Why it's built this way
+
+A single shared definition is what makes cross-target parity tractable for a solo developer. The alternative — re-declaring the App Group string, the `UserDefaults` keys, or the command vocabulary inside each target — works fine the day you write it and then rots silently: you rename a key in the iOS app, forget the widget, and the widget shows stale state with no compiler error to warn you. Echo avoids that entire class of bug by making the contracts un-forkable. The *behavior* stays per-target where it belongs, but the *shapes and keys* the targets exchange have one home in `Shared/`, so iOS, watchOS, macOS, and the widget cannot quietly disagree.
