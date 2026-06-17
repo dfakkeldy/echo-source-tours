@@ -46,9 +46,10 @@ public enum AppGroupDefaults {
         }
         return defaults
     }
+    // …
 ```
 
-The App Group identifier `"group.com.echo.audiobooks"` is the linchpin of cross-target data sharing: an App Group is an Apple-issued sandbox that several signed targets can all reach into, and naming it once here means no target can typo its way into a *different*, empty container. `AppGroupDefaults.shared` hands back the `UserDefaults` suite for that group, so the iOS app writes playback state and the widget reads it from the exact same store. The type is a `public enum` with only static members — a namespace, deliberately impossible to instantiate — which is the right shape for a constant that every target must agree on but no one should own an instance of.
+The App Group identifier `"group.com.echo.audiobooks"` is the linchpin of cross-target data sharing: an App Group is an Apple-issued sandbox that several signed targets can all reach into, and naming it once here means no target can typo its way into a *different*, empty container. `AppGroupDefaults.shared` hands back the `UserDefaults` suite for that group, so the iOS app writes playback state and the widget reads it from the exact same store. The type is a `public enum` with only static members — a namespace, deliberately impossible to instantiate — which is the right shape for a constant that every target must agree on but no one should own an instance of. (The elided `migrateStandardDefaultsIfNeeded` copies a fixed list of keys from `UserDefaults.standard` into the suite on first run — these keys predate the App Group and lived in `.standard` before targets needed to share them.)
 
 ```swift title="Shared/FileLocations.swift"
     /// The shared App Group container directory.
@@ -81,7 +82,7 @@ Here is what the widget *actually* reads — and it is worth being precise, beca
 The same App Group store is also where the widget's tap *writes back*:
 
 ```swift title="Echo Widget/Models/AppIntent.swift"
-    @MainActor
+    // …
     func perform() async throws -> some IntentResult {
         // Widget extensions cannot import WatchConnectivity. The main app
         // handles watch communication when openAppWhenRun opens it.
@@ -137,7 +138,7 @@ public enum WatchAction: String, Codable, CaseIterable, Identifiable {
 }
 ```
 
-`WatchAction` is the single enum that defines *every* remote-control action the watch can trigger, and its doc comment names all four targets that import it. The watch sends an action's `command` string over `WatchConnectivity`; the iOS side maps that same string back to behaviour. Because both ends switch over one `enum` rather than over loose strings each maintains separately, adding a case forces the compiler to surface it everywhere via `CaseIterable` — there is no way for the watch to send `"cycleSpeed"` while iOS quietly expects `"changeSpeed"`. That is the whole point of the shared definition: the wire vocabulary cannot drift, because there is only one copy of it.
+`WatchAction` is the single enum that defines *every* remote-control action the watch can trigger, and its doc comment names all four targets that import it. The watch sends an action's `command` string over `WatchConnectivity`; the iOS side maps that same string back to behaviour. Because both ends switch over one `enum` rather than over loose strings each maintains separately, adding a case forces the compiler to surface it everywhere it's switched on: each `switch self` here has no `default`, so a new case won't compile until you give it a `command` and an `iconName`. (The separate `CaseIterable` conformance just synthesizes `allCases`, used to enumerate the actions elsewhere, such as the iOS settings configuration the doc comment mentions.) There's no way for the watch to send `"cycleSpeed"` while iOS quietly expects `"changeSpeed"` — the string lives in exactly one switch. That is the whole point of the shared definition: the wire vocabulary cannot drift, because there is only one copy of it.
 
 ```swift title="Shared/WatchMessageKey.swift"
 /// Dictionary keys used in the WatchConnectivity message protocol.
@@ -148,7 +149,7 @@ enum WatchMessageKey {
 }
 ```
 
-The `command` string from `WatchAction` doesn't travel naked — it rides inside a `[String: Any]` message dictionary, and `WatchMessageKey` is the shared definition of the two keys that dictionary uses. The doc comment even names the concrete consumers on each side: `WatchCommandRouter` on iOS packs the dictionary, `WatchViewModel` on watchOS unpacks it. With both processes referencing `WatchMessageKey.command` rather than a hand-typed `"command"`, the envelope is as drift-proof as the payload.
+The `command` string from `WatchAction` doesn't travel naked — it rides inside a `[String: Any]` message dictionary alongside a `params` value, and that envelope's own keys get the same single-definition treatment as the payload. `WatchMessageKey` defines `command` and `params` exactly once, and its doc comment names the concrete consumers on each side: `WatchCommandRouter` on iOS packs the dictionary under those keys, `WatchViewModel` on watchOS reads them back out. Because both processes look up `WatchMessageKey.command` rather than a hand-typed `"command"`, a typo in the wrapper can't silently misroute a perfectly valid action.
 
 <Aside type="tip">
 The pattern in both halves of this tour is the same: put the *contract* in `Shared/`, not the behavior. Each target keeps its own UI, its own process, and its own capabilities — the widget can't talk to the watch, the watch sends commands the widget never will — but they all agree on the App Group name, the snapshot keys, the action vocabulary, and the message envelope, because each of those is defined exactly once.
@@ -157,3 +158,7 @@ The pattern in both halves of this tour is the same: put the *contract* in `Shar
 ## Why it's built this way
 
 A single shared definition is what makes cross-target parity tractable for a solo developer. The alternative — re-declaring the App Group string, the `UserDefaults` keys, or the command vocabulary inside each target — works fine the day you write it and then rots silently: you rename a key in the iOS app, forget the widget, and the widget shows stale state with no compiler error to warn you. Echo avoids that entire class of bug by making the contracts un-forkable. The *behavior* stays per-target where it belongs, but the *shapes and keys* the targets exchange have one home in `Shared/`, so iOS, watchOS, macOS, and the widget cannot quietly disagree.
+
+<Aside type="note">
+This tour traces three of the four consumers in code: iOS and the widget around the App Group store, iOS and the watch around the message contract. The macOS app is the fourth. It compiles against the same `Shared/` module, so it imports the identical definitions — and it does reach for one of them concretely: `MacPlayerModel` resolves `AppGroupDefaults.shared` to read and write the same playback snapshot. It does **not** reference `WatchAction` or `WatchMessageKey` (the Mac has no watch link to drive), so for the message contract macOS is a target that simply links the shared definitions without exercising them. The tour just doesn't walk its UI here.
+</Aside>
