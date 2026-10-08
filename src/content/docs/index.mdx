@@ -1,20 +1,26 @@
 ---
 title: Echo Source Tours
-description: Learn iOS & macOS development by touring a real, shipping app.
+description: Learn iOS & macOS development by touring Echo, a real app in public TestFlight beta.
 template: splash
 hero:
-  tagline: Learn iOS by reading a real, shipping app — Echo — one subsystem at a time.
+  tagline: Learn iOS by reading a real app in public TestFlight beta — Echo — one subsystem at a time.
   actions:
     - text: Start with Dependency Injection
       link: /echo-source-tours/tours/di-without-ceremony/
       icon: right-arrow
 ---
 
-import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 These tours walk through real subsystems of **Echo**, an open-source audiobook study
 player for iOS, watchOS, and macOS. Each tour snapshots the actual source at a known
 commit and explains it block by block.
+
+<Aside title="Snapshot from June 2026">
+  All tours are pinned to the June 2026 Echo source, commit
+  [`c5807ec`](https://github.com/dfakkeldy/Echo/commit/c5807ec). Echo has kept changing since,
+  so some files, names and details may differ from the current code.
+</Aside>
 
 ## Tours
 
