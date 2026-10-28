@@ -81,7 +81,7 @@ This is Tier 0's scoring core, and it combines two complementary similarity meas
     }
 ```
 
-This guard is what keeps Tier 0 honest. M4B metadata numbers *tracks*, not book chapters — an Audible rip routinely labels its opening-credits track `"Chapter 1"`, which shifts every later label off the ebook's own numbering — so a title like `"Chapter 7"` or a bare `"12"` carries no information about *which* ebook heading the audio corresponds to. `isGenericNumericTitle` detects those generic labels (a structural keyword plus a number, or a bare number) and the matcher skips them entirely, leaving those chapters for the content-based pipeline below. It's a deliberate refusal to manufacture confidence from a coincidence: matching `"Chapter 7"` to the ebook's heading that happens to read `"Chapter 7"` would feel like a hit but prove nothing.
+This guard is what keeps Tier 0 honest. M4B metadata numbers *tracks*, not book chapters — many M4B files label the opening-credits track `"Chapter 1"`, which shifts every later label off the ebook's own numbering — so a title like `"Chapter 7"` or a bare `"12"` carries no information about *which* ebook heading the audio corresponds to. `isGenericNumericTitle` detects those generic labels (a structural keyword plus a number, or a bare number) and the matcher skips them entirely, leaving those chapters for the content-based pipeline below. It's a deliberate refusal to manufacture confidence from a coincidence: matching `"Chapter 7"` to the ebook's heading that happens to read `"Chapter 7"` would feel like a hit but prove nothing.
 
 ## Content alignment: the expensive path
 
